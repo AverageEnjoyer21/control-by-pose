@@ -1,21 +1,16 @@
 from ultralytics import YOLO
 from djitellopy import Tello
-import os
 import logging
 import cv2
 import time
 
-# === Настройки окружения ===
-os.environ["OPENCV_FFMPEG_SKIP_FRAME_CHECK"] = "1"
-
 # Отключаем логирование Tello (опционально)
-logging.getLogger("djitellopy").setLevel(logging.WARNING)
+# logging.getLogger("djitellopy").setLevel(logging.WARNING)
 
 # === ПАРАМЕТРЫ ОТСЛЕЖИВАНИЯ ===
 DEAD_ZONE_X = 150  # Мёртвая зона по горизонтали (px)
 DEAD_ZONE_Y = 100  # Мёртвая зона по вертикали (px)
 TARGET_ID = None  # ID отслеживаемого человека (автовыбор при первом обнаружении)
-FRAME_SKIP = 1  # Обрабатывать каждый N-й кадр (ускорение)
 
 # Индексы ключевых точек (формат COCO)
 LEFT_SHOULDER = 5
@@ -23,28 +18,27 @@ RIGHT_SHOULDER = 6
 LEFT_HIP = 11
 RIGHT_HIP = 12
 
+# === ЗАГРУЗКА МОДЕЛИ YOLOv8 POSE ===
+model = YOLO("yolov8n-pose.pt")
 
 # === ИНИЦИАЛИЗАЦИЯ ДРОНА ===
 fly = Tello()
 fly.connect()
 
-# Остановить все движения при старте
-fly.send_rc_control(0, 0, 0, 0)
+# Устанавливаем частоту видеосъёмки в 15 FPS
+fly.set_video_fps(Tello.FPS_15)
+
+# Устанавливаем автоматический битрейт изображения (можно поставить от 1 до 5)
+fly.set_video_bitrate(Tello.BITRATE_AUTO)
+
+# Заряд батареи
 print(f"Заряд батареи: {fly.get_battery()}%")
-
-# Уменьшить битрейт видео для стабильности при слабом Wi-Fi
-# fly.set_video_bitrate(1)  # 1 Мбит/с
-# print("Битрейт видео установлен на 1 Мбит/с")
-
-
-# === ЗАГРУЗКА МОДЕЛИ YOLOv8 POSE ===
-model = YOLO("yolov8n-pose.pt")
-
 
 # === ВКЛЮЧЕНИЕ ВИДЕОПОТОКА ===
 fly.streamon()
 print("Видеопоток включён. Ожидание первого кадра...")
 
+# Получаем первый кадр с камеры
 frame_read = fly.get_frame_read()
 
 # Ждём первый валидный кадр
@@ -61,6 +55,10 @@ while True:
 time.sleep(1)
 print("Отслеживание запущено. Нажмите 'q' для выхода.")
 
+# Остановить все движения при старте
+fly.send_rc_control(0, 0, 0, 0)
+
+# Взлет
 # fly.takeoff()
 
 # === ФУНКЦИИ ОБРАБОТКИ ПОЗЫ ===
@@ -127,20 +125,14 @@ def get_command(body_x, body_y, square, cx, cy):
         fly.send_rc_control(0, 0, 0, 0)  # Стоп
 
 
-# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ЦИКЛА ===
-last_annotated_frame = None  # Кэшированный аннотированный кадр
-frame_counter = 0  # Счётчик кадров для пропуска
-
-
 # === ОСНОВНОЙ ЦИКЛ ОБРАБОТКИ ===
 try:
     while True:
-        start_time = time.time()
 
         # Получение кадра с камеры дрона
         frame = frame_read.frame
-        frame_counter += 1
 
+        # Проверка на пустой кадр
         if frame is None or frame.size == 0:
             print("Пустой кадр — пропуск...")
             cv2.waitKey(1)
@@ -151,94 +143,86 @@ try:
         h, w = my_frame.shape[:2]
         center_x, center_y = w // 2, h // 2
 
-        # Пропуск кадров для оптимизации (обрабатываем каждый FRAME_SKIP-й)
-        if frame_counter % FRAME_SKIP == 0:
-            # Обнаружение и трекинг позы
-            results = model.track(my_frame, persist=True, verbose=False, imgsz=320)
-            result = results[0]
+        # Обнаружение и трекинг позы
+        results = model.track(my_frame, persist=True, verbose=False)
+        result = results[0]
 
-            # Визуализация: рисуем скелет, но без bounding box
-            annotated_frame = result.plot(boxes=False)
+        # Визуализация: рисуем скелет, но без bounding box
+        annotated_frame = result.plot(boxes=False)
 
-            # Отображаем центр кадра
-            cv2.circle(annotated_frame, (center_x, center_y), 8, (0, 0, 255), -1)
+        # Отображаем центр кадра
+        cv2.circle(annotated_frame, (center_x, center_y), 8, (0, 0, 255), -1)
 
-            # Извлечение данных
-            boxes = result.boxes
-            keypoints = result.keypoints
+        # Извлечение данных
+        boxes = result.boxes
+        keypoints = result.keypoints
 
-            if (
-                boxes is not None
-                and boxes.id is not None
-                and len(boxes) > 0
-                and keypoints is not None
-            ):
+        # Обработка обнаруженных людей
+        if (
+            boxes is not None
+            and boxes.id is not None
+            and len(boxes) > 0
+            and keypoints is not None
+        ):
+            # Список ID людей и ключевых точек
+            track_ids = boxes.id.int().cpu().tolist()
+            kpts_list = keypoints.xy.cpu().tolist()
 
-                track_ids = boxes.id.int().cpu().tolist()
-                kpts_list = keypoints.xy.cpu().tolist()
+            # Автовыбор целевого человека (первый обнаруженный)
+            if TARGET_ID is None and len(track_ids) > 0:
+                TARGET_ID = track_ids[0]
+                print(f"Выбран ID для отслеживания: {TARGET_ID}")
 
-                # Автовыбор целевого человека (первый обнаруженный)
-                if TARGET_ID is None and len(track_ids) > 0:
-                    TARGET_ID = track_ids[0]
-                    print(f"Выбран ID для отслеживания: {TARGET_ID}")
+            # Если целевой человек найден
+            if TARGET_ID in track_ids:
+                idx = track_ids.index(TARGET_ID)
+                person_kpts = kpts_list[idx]
 
-                # Если целевой человек найден
-                if TARGET_ID in track_ids:
-                    idx = track_ids.index(TARGET_ID)
-                    person_kpts = kpts_list[idx]
+                # Вычисляем центр и площадь тела
+                body_x, body_y = calculate_body_center(person_kpts)
+                body_square = calculate_body_area(person_kpts)
 
-                    body_x, body_y = calculate_body_center(person_kpts)
-                    body_square = calculate_body_area(person_kpts)
+                # Визуализация центра тела
+                cv2.circle(annotated_frame, (body_x, body_y), 8, (255, 0, 255), -1)
 
-                    # Визуализация центра тела
-                    cv2.circle(annotated_frame, (body_x, body_y), 8, (255, 0, 255), -1)
+                # Отображение площади в кадре
+                cv2.putText(
+                    annotated_frame,
+                    f"S: {body_square}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 0),
+                    2,
+                )
 
-                    # Отображение площади в кадре
-                    cv2.putText(
-                        annotated_frame,
-                        f"S: {body_square}",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                    )
-
-                    # Отправка управляющих команд
-                    get_command(body_x, body_y, body_square, center_x, center_y)
-                else:
-                    print("Целевой человек не найден. Сброс ID.")
-                    TARGET_ID = None
-                    annotated_frame = my_frame.copy()  # Без изменений
+                # Отправка управляющих команд
+                get_command(body_x, body_y, body_square, center_x, center_y)
             else:
-                print("Люди не обнаружены.")
+                # Если целевой человек пропал
+                print("Целевой человек не найден. Сброс ID.")
                 TARGET_ID = None
-                annotated_frame = my_frame.copy()
+        else:
+            # Если люди не обнаружены
+            print("Люди не обнаружены.")
+            TARGET_ID = None
 
-            # Сохраняем аннотированный кадр для отображения
-            last_annotated_frame = annotated_frame
+        # Отображение кадра
+        cv2.imshow("Pose Tracking", cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
 
-        # Отображение: всегда показываем последний валидный кадр
-        display_frame = (
-            last_annotated_frame if last_annotated_frame is not None else my_frame
-        )
-        cv2.imshow("Pose Tracking", cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
-
-        # Управление FPS (~30 FPS)
-        elapsed = time.time() - start_time
-        wait_time = max(1, int(33 - elapsed * 1000))  # ~30 мс
-        key = cv2.waitKey(wait_time) & 0xFF
-        if key == ord("q"):
+        # Выход по нажатию 'q'
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+# Обработка исключений
 except KeyboardInterrupt:
     print("\nПрерывание по Ctrl+C.")
 
+# Завершение работы
 finally:
-    # Завершение работы
     cv2.destroyAllWindows()
     fly.send_rc_control(0, 0, 0, 0)  # Остановить дрон
-    # fly.land()
+    # fly.land()    # Посадка
     print(f"Заряд батареи: {fly.get_battery()}%")
     print("Конец полёта.")
     fly.streamoff()
