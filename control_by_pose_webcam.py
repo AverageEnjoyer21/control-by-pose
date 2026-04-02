@@ -87,20 +87,35 @@ def get_command(body_x, body_y, square, cx, cy):
     :param cx: центр кадра по X
     :param cy: центр кадра по Y
     """
+    # Определяем команду по условиям
     if body_x > cx + DEAD_ZONE_X:
-        print("Двигайся направо")  # Поворот направо
+        command = "GO RIGHT"
     elif body_x < cx - DEAD_ZONE_X:
-        print("Двигайся налево")  # Поворот налево
+        command = "GO LEFT"
     elif body_y > cy + DEAD_ZONE_Y:
-        print("Лети вниз")  # Вниз
+        command = "GO DOWN"
     elif body_y < cy - DEAD_ZONE_Y:
-        print("Лети вверх")  # Вверх
+        command = "GO UP"
     elif square > 30000:
-        print("Лети назад")  # Назад (если человек близко)
+        command = "GO BACK"
     elif square < 7000:
-        print("Лети вперёд")  # Вперёд (если далеко)
+        command = "GO FORWARD"
     else:
-        print("Стоп")  # Стоп
+        command = "STOP"
+
+    # Вывод в консоль
+    print(command)
+
+    # Один вызов putText вместо шести
+    cv2.putText(
+        annotated_frame,
+        command,
+        (w - 125, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 0),
+        2,
+    )
 
 
 try:
@@ -115,12 +130,11 @@ try:
             continue
 
         # Подготовка изображения
-        my_frame = cv2.resize(frame, (640, 480))
-        h, w = my_frame.shape[:2]
+        h, w = frame.shape[:2]
         center_x, center_y = w // 2, h // 2
 
         # Обнаружение и трекинг позы
-        results = model.track(my_frame, persist=True, verbose=False)
+        results = model.track(frame, persist=True, verbose=False)
         result = results[0]
 
         # Визуализация: рисуем скелет, но без bounding box
