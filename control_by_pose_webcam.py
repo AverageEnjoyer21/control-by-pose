@@ -118,6 +118,7 @@ def get_command(body_x, body_y, square, cx, cy):
     )
 
 
+# === ОСНОВНОЙ ЦИКЛ ОБРАБОТКИ ===
 try:
     while True:
 
@@ -134,68 +135,87 @@ try:
         center_x, center_y = w // 2, h // 2
 
         # Обнаружение и трекинг позы
-        results = model.track(frame, persist=True, verbose=False)
+        results = model(frame, verbose=False)
         result = results[0]
+        keypoints = (
+            result.keypoints.xy.cpu().tolist() if result.keypoints is not None else []
+        )
 
         # Визуализация: рисуем скелет, но без bounding box
         annotated_frame = result.plot(boxes=False)
 
         # Отображаем центр кадра
-        cv2.circle(annotated_frame, (center_x, center_y), 8, (0, 0, 255), -1)
+        cv2.circle(annotated_frame, (center_x, center_y), 8, (255, 0, 0), -1)  # Красный
 
-        # Извлечение данных
-        boxes = result.boxes
-        keypoints = result.keypoints
+        # Создание переменных для поиска ближайшего  человека
+        biggest_area = 0
+        body_center = None
 
         # Обработка обнаруженных людей
-        if (
-            boxes is not None
-            and boxes.id is not None
-            and len(boxes) > 0
-            and keypoints is not None
-        ):
-            # Список ID людей и ключевых точек
-            track_ids = boxes.id.int().cpu().tolist()
-            kpts_list = keypoints.xy.cpu().tolist()
+        if len(keypoints) > 0:
+            for kpts in keypoints:
+                # Проверяем, что достаточно ключевых точек (COCO: минимум 13, чтобы прочитать kpts[12])
+                if len(kpts) >= 13:
+                    try:
+                        area = calculate_body_area(kpts)
+                        cx_body, cy_body = calculate_body_center(kpts)
 
-            # Автовыбор целевого человека (первый обнаруженный)
-            if TARGET_ID is None and len(track_ids) > 0:
-                TARGET_ID = track_ids[0]
-                print(f"Выбран ID для отслеживания: {TARGET_ID}")
+                        if area < 5000:
+                            continue  # Пропускаем слишком маленькие объекты
 
-            # Если целевой человек найден
-            if TARGET_ID in track_ids:
-                idx = track_ids.index(TARGET_ID)
-                person_kpts = kpts_list[idx]
+                        # Выбираем самого крупного ЧЕЛОВЕКА, который примерно в центре
+                        if (
+                            area > biggest_area * 1.2
+                            and abs(cx_body - center_x) < w * 0.4
+                        ):
+                            biggest_area = area
+                            body_center = (cx_body, cy_body)
+                    except Exception as e:
+                        continue  # Пропускаем повреждённые данные
 
-                # Вычисляем центр и площадь тела
-                body_x, body_y = calculate_body_center(person_kpts)
-                body_square = calculate_body_area(person_kpts)
+        # --- Визуализация цели ---
+        if body_center is not None:
+            # Круг в центре тела
+            cv2.circle(annotated_frame, body_center, 10, (0, 0, 255), -1)
 
-                # Визуализация центра тела
-                cv2.circle(annotated_frame, (body_x, body_y), 8, (255, 0, 255), -1)
+            # Текст с координатами
+            cv2.putText(
+                annotated_frame,
+                f"Body Center",
+                (body_center[0] + 15, body_center[1] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2,
+            )
 
-                # Отображение площади в кадре
-                cv2.putText(
-                    annotated_frame,
-                    f"S: {body_square}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (255, 255, 0),
-                    2,
-                )
-
-                # Отправка управляющих команд
-                get_command(body_x, body_y, body_square, center_x, center_y)
-            else:
-                # Если целевой человек пропал
-                print("Целевой человек не найден. Сброс ID.")
-                TARGET_ID = None
+            # Площадь тела (остаётся как есть)
+            cv2.putText(
+                annotated_frame,
+                f"Body Area: {biggest_area}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2,
+            )
+        # Если человека нет — отправляем стоп-команду
         else:
-            # Если люди не обнаружены
-            print("Люди не обнаружены.")
-            TARGET_ID = None
+            cv2.putText(
+                annotated_frame,
+                f"STOP",
+                (w - 125, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2,
+            )
+
+        # --- Управление дроном ---
+        if body_center is not None:
+            get_command(
+                body_center[0], body_center[1], biggest_area, center_x, center_y
+            )
 
         # Отображение кадра
         cv2.imshow("Pose Tracking", annotated_frame)
@@ -207,7 +227,6 @@ try:
 # Обработка исключений
 except KeyboardInterrupt:
     print("\nПрерывание по Ctrl+C.")
-
 
 # Завершение работы
 finally:
